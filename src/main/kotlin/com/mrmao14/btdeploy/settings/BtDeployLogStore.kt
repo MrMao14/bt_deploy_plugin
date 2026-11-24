@@ -1,4 +1,4 @@
-package com.jimmy.btdeploy.settings
+package com.mrmao14.btdeploy.settings
 
 import java.util.concurrent.ConcurrentHashMap
 

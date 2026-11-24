@@ -1,8 +1,9 @@
-package com.jimmy.btdeploy.deploy
+package com.mrmao14.btdeploy.deploy
 
 import com.google.gson.JsonObject
-import com.jimmy.btdeploy.api.BtApiException
-import com.jimmy.btdeploy.api.BtClient
+import com.mrmao14.btdeploy.api.BtApiException
+import com.mrmao14.btdeploy.api.BtClient
+import com.mrmao14.btdeploy.api.RemoteFile
 import java.nio.file.Files
 import java.nio.file.Path
 import java.text.SimpleDateFormat
@@ -82,6 +83,24 @@ object Deployer {
         }
     }
 
+    fun listBackups(client: BtClient, remoteDir: String): List<RemoteFile> =
+        client.listDir("${remoteDir.trim().trimEnd('/')}/$BAK_DIR")
+            .filter { it.name.startsWith(ZIP_PREFIX) && it.name.endsWith(".zip") }
+            .sortedByDescending { it.mtime }
+
+    /** 把 bak/ 里指定的部署包重新解压到远程目录，并执行配置的部署后动作。 */
+    fun restoreBackup(client: BtClient, config: DeployConfig, filename: String, log: (String) -> Unit) {
+        val remoteDir = config.remoteDir.trim().trimEnd('/')
+        if (remoteDir.isEmpty()) throw BtApiException("远程目标目录不能为空")
+
+        log("[1/2] 解压备份 $filename 到 $remoteDir")
+        checkUnzip(client.unzip("$remoteDir/$BAK_DIR/$filename", remoteDir))
+        log("      解压完成")
+
+        log("[2/2] 重启服务")
+        restart(client, config, log)
+    }
+
     private fun buildZip(sources: List<Path>, workDir: Path, keepRoot: Boolean): Path {
         // 只有一个 zip 时直接上传，省掉解压再压缩
         if (sources.size == 1 && Files.isRegularFile(sources[0]) &&
@@ -140,9 +159,7 @@ object Deployer {
     }
 
     private fun pruneBackups(client: BtClient, remoteDir: String): Int {
-        val backups = client.listDir("$remoteDir/$BAK_DIR")
-            .filter { it.name.startsWith(ZIP_PREFIX) && it.name.endsWith(".zip") }
-            .sortedByDescending { it.mtime }
+        val backups = listBackups(client, remoteDir)
         backups.drop(BAK_KEEP).forEach { client.delete("$remoteDir/$BAK_DIR/${it.name}") }
         return (backups.size - BAK_KEEP).coerceAtLeast(0)
     }

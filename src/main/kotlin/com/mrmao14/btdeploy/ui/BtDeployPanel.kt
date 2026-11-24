@@ -1,4 +1,4 @@
-package com.jimmy.btdeploy.ui
+package com.mrmao14.btdeploy.ui
 
 import com.intellij.icons.AllIcons
 import com.intellij.notification.NotificationGroupManager
@@ -8,30 +8,33 @@ import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.progress.ProgressIndicator
 import com.intellij.openapi.progress.Task
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.ui.Messages
 import com.intellij.task.ProjectTaskManager
+import com.intellij.openapi.ui.Messages
 import com.intellij.ui.JBColor
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.util.ui.JBUI
 import com.intellij.util.ui.UIUtil
-import com.jimmy.btdeploy.api.BtApiException
-import com.jimmy.btdeploy.api.BtClient
-import com.jimmy.btdeploy.deploy.DeployConfig
-import com.jimmy.btdeploy.deploy.Deployer
-import com.jimmy.btdeploy.deploy.RestartType
-import com.jimmy.btdeploy.deploy.StatusService
-import com.jimmy.btdeploy.deploy.TargetState
-import com.jimmy.btdeploy.deploy.TargetStatus
-import com.jimmy.btdeploy.settings.BtDeployLogStore
-import com.jimmy.btdeploy.settings.BtDeployProjectSettings
-import com.jimmy.btdeploy.settings.BtDeployProjectSettings.PanelConfig
-import com.jimmy.btdeploy.settings.BtDeployProjectSettings.TargetConfig
+import com.mrmao14.btdeploy.api.BtApiException
+import com.mrmao14.btdeploy.api.BtClient
+import com.mrmao14.btdeploy.deploy.DeployConfig
+import com.mrmao14.btdeploy.deploy.Deployer
+import com.mrmao14.btdeploy.deploy.RestartType
+import com.mrmao14.btdeploy.deploy.StatusService
+import com.mrmao14.btdeploy.deploy.TargetState
+import com.mrmao14.btdeploy.deploy.TargetStatus
+import com.mrmao14.btdeploy.settings.BtDeployLogStore
+import com.mrmao14.btdeploy.settings.BtDeploySettings
+import com.mrmao14.btdeploy.settings.BtDeploySettings.Listener
+import com.mrmao14.btdeploy.settings.BtDeploySettings.PanelConfig
+import com.mrmao14.btdeploy.settings.BtDeploySettings.TargetConfig
 import org.jetbrains.concurrency.Promise
 import java.awt.BorderLayout
 import java.awt.Dimension
 import java.awt.FlowLayout
 import java.awt.Font
+import java.awt.LayoutManager
+import java.awt.Rectangle
 import java.nio.file.Paths
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -45,13 +48,14 @@ import javax.swing.JComboBox
 import javax.swing.JComponent
 import javax.swing.JPanel
 import javax.swing.JTextArea
+import javax.swing.Scrollable
 import javax.swing.SwingConstants
 
 class BtDeployPanel(private val project: Project) {
     private val app = ApplicationManager.getApplication()
-    private val projectSettings = project.getService(BtDeployProjectSettings::class.java)
+    private val settings = app.getService(BtDeploySettings::class.java)
     private val logStore = project.getService(BtDeployLogStore::class.java)
-    private val state get() = projectSettings.state
+    private val state get() = settings.state
 
     private val panelCombo = JComboBox<PanelConfig>()
     private val refreshStatusButton = JButton("刷新", AllIcons.Actions.Refresh)
@@ -72,6 +76,11 @@ class BtDeployPanel(private val project: Project) {
     val component: JComponent = buildUi()
 
     init {
+        app.messageBus.connect(project).subscribe(Listener.TOPIC, Listener {
+            refreshPanels()
+            refreshTargets()
+            refreshStatuses()
+        })
         bindEvents()
         refreshPanels()
         refreshTargets()
@@ -96,7 +105,7 @@ class BtDeployPanel(private val project: Project) {
 
         cardsBox.layout = BoxLayout(cardsBox, BoxLayout.Y_AXIS)
         cardsBox.background = UIUtil.getPanelBackground()
-        val cardsWrapper = JPanel(BorderLayout()).apply {
+        val cardsWrapper = ScrollablePanel(BorderLayout()).apply {
             background = UIUtil.getPanelBackground()
             add(cardsBox, BorderLayout.NORTH)
         }
@@ -152,7 +161,7 @@ class BtDeployPanel(private val project: Project) {
 
     private fun openSettings() {
         if (busy.get()) return
-        SettingsDialog(project, projectSettings, logStore, state.activePanelId).show()
+        SettingsDialog(project, settings, logStore, state.activePanelId).show()
         refreshPanels()
         refreshTargets()
         refreshStatuses()
@@ -199,19 +208,27 @@ class BtDeployPanel(private val project: Project) {
                         selected = target.id == state.selectedTargetId,
                         enabled = !busy.get(),
                         onSelect = { selectTarget(target.id) },
-                        onDeploy = {
+                        onDeploy = { buildFirst ->
                             selectTarget(target.id)
-                            deploy(target, buildFirst = false)
+                            deploy(target, buildFirst)
                         },
-                        onBuildDeploy = {
+                        onStart = {
                             selectTarget(target.id)
-                            deploy(target, buildFirst = true)
+                            serviceAction(target, "start", "启动")
                         },
-                        onEdit = {
+                        onStop = {
                             selectTarget(target.id)
-                            editTarget(target)
+                            serviceAction(target, "stop", "停止")
                         },
-                        onDelete = { deleteTarget(target) },
+                        onRestart = {
+                            selectTarget(target.id)
+                            serviceAction(target, "restart", "重启")
+                        },
+                        onRestoreBackup = {
+                            selectTarget(target.id)
+                            restoreBackup(target)
+                        },
+                        onViewLog = { viewLogs(target) },
                     )
                 )
             }
@@ -232,7 +249,7 @@ class BtDeployPanel(private val project: Project) {
     }
 
     private fun selectTarget(id: String) {
-        if (state.selectedTargetId == id) return
+        if (busy.get() || state.selectedTargetId == id) return
         state.selectedTargetId = id
         refreshTargets()
     }
@@ -323,12 +340,7 @@ class BtDeployPanel(private val project: Project) {
     }
 
     private fun fallbackStatuses(targets: List<TargetConfig>): Map<String, TargetStatus> =
-        targets.associate {
-            val type = RestartType.from(it.restartType)
-            it.id to TargetStatus(
-                if (type == RestartType.NONE) TargetState.NOT_APPLICABLE else TargetState.UNKNOWN
-            )
-        }
+        targets.associate { it.id to TargetStatus(TargetState.UNKNOWN) }
 
     private fun deploy(target: TargetConfig, buildFirst: Boolean) {
         if (busy.get()) return
@@ -347,14 +359,7 @@ class BtDeployPanel(private val project: Project) {
         refreshTargets()
         prepareLogFor(target)
 
-        val config = DeployConfig(
-            sources = target.localPaths.map { Paths.get(it) },
-            remoteDir = target.remoteDir,
-            keepRoot = target.keepRoot,
-            restart = RestartType.from(target.restartType),
-            serviceName = target.serviceName,
-            projectName = target.javaProjectName,
-        )
+        val config = deployConfig(target)
         val title = if (buildFirst) "打包并部署" else "部署"
         appendLog(target, "===== $title：${target.name} =====")
 
@@ -365,6 +370,115 @@ class BtDeployPanel(private val project: Project) {
                 log("IDEA Build 完成")
             }
             Deployer.deploy(client, config, log)
+        }
+    }
+
+    private fun deployConfig(target: TargetConfig): DeployConfig =
+        DeployConfig(
+            sources = target.localPaths.map { Paths.get(it) },
+            remoteDir = target.remoteDir,
+            keepRoot = target.keepRoot,
+            restart = RestartType.from(target.restartType),
+            serviceName = target.serviceName,
+            projectName = target.javaProjectName,
+        )
+
+    private fun serviceAction(target: TargetConfig, operation: String, label: String) {
+        if (busy.get()) return
+        val panel = activePanel() ?: return warn(target, "请先选择面板")
+        val java = RestartType.from(target.restartType) == RestartType.JAVA_RESTART
+        val name = if (java) {
+            target.javaProjectName.trim()
+        } else {
+            target.serviceName.trim().ifBlank { "webserver" }
+        }
+        if (name.isBlank()) return warn(target, "请先配置 Java 项目名称")
+
+        val client = try {
+            BtClient(panel.panelUrl, panel.apiSk, panel.verifySsl)
+        } catch (e: BtApiException) {
+            warn(target, e.message ?: "面板配置有误")
+            return
+        }
+
+        state.selectedTargetId = target.id
+        refreshTargets()
+        prepareLogFor(target)
+        val title = "$label ${target.name}"
+        appendLog(target, "===== $title =====")
+        runTask(title, target, "${label}完成 ✅") { log ->
+            if (java) {
+                client.javaProjectAction(name, operation)
+                log("      已${label}Java 项目 $name")
+            } else {
+                client.serviceAdmin(name, operation)
+                log("      已${label}服务 $name")
+            }
+        }
+    }
+
+    private fun restoreBackup(target: TargetConfig) {
+        if (!busy.compareAndSet(false, true)) return
+        val panel = activePanel()
+        val remoteDir = target.remoteDir.trim()
+        if (panel == null || remoteDir.isEmpty()) {
+            busy.set(false)
+            return warn(target, if (panel == null) "请先选择面板" else "请先填写远程目录")
+        }
+
+        val client = try {
+            BtClient(panel.panelUrl, panel.apiSk, panel.verifySsl)
+        } catch (e: BtApiException) {
+            busy.set(false)
+            return warn(target, e.message ?: "面板配置有误")
+        }
+
+        state.selectedTargetId = target.id
+        refreshTargets()
+        app.executeOnPooledThread {
+            val result = runCatching { Deployer.listBackups(client, remoteDir) }
+            app.invokeLater {
+                busy.set(false)
+                refreshTargets()
+                val failure = result.exceptionOrNull()
+                if (failure != null) {
+                    warn(target, "读取备份失败：${failure.message ?: failure.javaClass.simpleName}")
+                    return@invokeLater
+                }
+
+                val backups = result.getOrThrow()
+                if (backups.isEmpty()) {
+                    warn(target, "该配置还没有备份；部署成功一次后会保存在远程 bak/ 目录")
+                    return@invokeLater
+                }
+
+                val labels = backups.map { "${it.name}  ${formatSize(it.size)}  ${formatBackupTime(it.mtime)}" }
+                val index = Messages.showChooseDialog(
+                    project,
+                    "选择要还原的备份：",
+                    "还原备份",
+                    Messages.getQuestionIcon(),
+                    labels.toTypedArray(),
+                    labels.first(),
+                )
+                if (index < 0) return@invokeLater
+
+                val backup = backups[index]
+                val answer = Messages.showYesNoDialog(
+                    project,
+                    "用「${backup.name}」覆盖 ${target.remoteDir} 里的现有文件？",
+                    "确认还原",
+                    Messages.getWarningIcon(),
+                )
+                if (answer != Messages.YES) return@invokeLater
+
+                prepareLogFor(target)
+                appendLog(target, "===== 还原备份：${backup.name} =====")
+                val config = deployConfig(target)
+                runTask("还原备份", target, "还原完成 ✅") { log ->
+                    Deployer.restoreBackup(client, config, backup.name, log)
+                }
+            }
         }
     }
 
@@ -433,40 +547,19 @@ class BtDeployPanel(private val project: Project) {
         }.queue()
     }
 
-    private fun editTarget(target: TargetConfig) {
-        if (busy.get()) return
-        val panel = activePanel() ?: return
-        val edited = target.copy()
-        val names = state.targets
-            .filter { it.panelId == target.panelId && it.id != target.id }
-            .map { it.name }
-            .toSet()
-        val dialog = TargetDialog(project, panel, edited, names)
-        if (!dialog.showAndGet()) return
-        dialog.apply()
-
-        val index = state.targets.indexOfFirst { it.id == target.id }
-        if (index >= 0) state.targets[index] = edited
-        state.selectedTargetId = edited.id
-        refreshTargets()
-        refreshStatuses()
-    }
-
-    private fun deleteTarget(target: TargetConfig) {
-        if (busy.get()) return
-        val answer = Messages.showYesNoDialog(
-            project,
-            "删除部署配置「${target.name}」？",
-            "删除配置",
-            Messages.getWarningIcon(),
-        )
-        if (answer != Messages.YES) return
-
-        state.targets.remove(target)
-        logStore.clear(target.id)
-        if (state.selectedTargetId == target.id) state.selectedTargetId = ""
-        refreshTargets()
-        refreshStatuses()
+    private fun viewLogs(target: TargetConfig) {
+        if (target.remoteDir.isBlank()) {
+            notify("宝塔部署", "「${target.name}」未配置远程目录", NotificationType.WARNING)
+            return
+        }
+        val panel = activePanel() ?: return notify("宝塔部署", "请先选择面板", NotificationType.WARNING)
+        val client = try {
+            BtClient(panel.panelUrl, panel.apiSk, panel.verifySsl, 30_000)
+        } catch (e: BtApiException) {
+            notify("宝塔部署", e.message ?: "面板配置有误", NotificationType.ERROR)
+            return
+        }
+        TargetLogDialog(project, target, client).show()
     }
 
     private fun warn(target: TargetConfig?, message: String) {
@@ -483,6 +576,29 @@ class BtDeployPanel(private val project: Project) {
 
     private fun timestamp(): String =
         SimpleDateFormat("HH:mm:ss", Locale.ROOT).format(Date())
+
+    private fun formatSize(bytes: Long): String = when {
+        bytes >= 1024 * 1024 -> "%.1f MB".format(Locale.ROOT, bytes / 1024.0 / 1024.0)
+        bytes >= 1024 -> "%.1f KB".format(Locale.ROOT, bytes / 1024.0)
+        else -> "$bytes B"
+    }
+
+    private fun formatBackupTime(seconds: Long): String =
+        SimpleDateFormat("MM-dd HH:mm", Locale.ROOT).format(Date(seconds * 1000))
+
+    /** 宽度跟随工具窗口，高度按卡片实际高度，避免卡片被拉高。 */
+    private class ScrollablePanel(layout: LayoutManager) : JPanel(layout), Scrollable {
+        override fun getPreferredScrollableViewportSize(): Dimension = preferredSize
+
+        override fun getScrollableUnitIncrement(visibleRect: Rectangle, orientation: Int, direction: Int): Int = 16
+
+        override fun getScrollableBlockIncrement(visibleRect: Rectangle, orientation: Int, direction: Int): Int =
+            visibleRect.height
+
+        override fun getScrollableTracksViewportWidth(): Boolean = true
+
+        override fun getScrollableTracksViewportHeight(): Boolean = false
+    }
 
     private companion object {
         const val NO_TARGET_TEXT = "选择一个部署配置查看日志"

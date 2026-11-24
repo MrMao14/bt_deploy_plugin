@@ -1,16 +1,15 @@
-package com.jimmy.btdeploy.deploy
+package com.mrmao14.btdeploy.deploy
 
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
-import com.jimmy.btdeploy.api.BtClient
-import com.jimmy.btdeploy.settings.BtDeployProjectSettings.TargetConfig
+import com.mrmao14.btdeploy.api.BtClient
+import com.mrmao14.btdeploy.settings.BtDeploySettings.TargetConfig
 
 enum class TargetState(val label: String) {
     RUNNING("运行中"),
     STOPPED("已停止"),
     UNKNOWN("未知"),
     NOT_INSTALLED("未安装"),
-    NOT_APPLICABLE("不重启"),
 }
 
 data class TargetStatus(val state: TargetState)
@@ -28,9 +27,8 @@ object StatusService {
     fun load(client: BtClient, targets: List<TargetConfig>): Map<String, TargetStatus> {
         val kinds = targets.map { RestartType.from(it.restartType) }
         val needJava = kinds.any { it == RestartType.JAVA_RESTART }
-        val needEnv = kinds.any {
-            it == RestartType.WEBSERVER_RELOAD || it == RestartType.SERVICE_RESTART
-        }
+        // 不重启的静态站也显示 Web 服务器状态
+        val needEnv = kinds.any { it != RestartType.JAVA_RESTART }
 
         val javaStatuses = if (needJava) {
             runCatching { client.listJavaProjects() }
@@ -44,7 +42,7 @@ object StatusService {
         return targets.associate { target ->
             val type = RestartType.from(target.restartType)
             val status = when (type) {
-                RestartType.NONE -> TargetStatus(TargetState.NOT_APPLICABLE)
+                RestartType.NONE -> serviceStatus(env, "web")
 
                 RestartType.JAVA_RESTART -> {
                     val project = target.javaProjectName.trim()

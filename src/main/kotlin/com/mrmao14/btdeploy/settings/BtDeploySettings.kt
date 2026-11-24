@@ -1,13 +1,23 @@
-package com.jimmy.btdeploy.settings
+package com.mrmao14.btdeploy.settings
 
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.PersistentStateComponent
 import com.intellij.openapi.components.State
 import com.intellij.openapi.components.Storage
+import com.intellij.util.messages.Topic
 import java.util.UUID
 
-/** 当前项目的面板与部署配置，保存在 .idea/bt-deploy.xml。 */
-@State(name = "BtDeployProjectSettings", storages = [Storage("bt-deploy.xml")])
-class BtDeployProjectSettings : PersistentStateComponent<BtDeployProjectSettings.State> {
+/** IDE 全局的面板与部署配置，所有项目共享。 */
+@State(name = "BtDeploySettings", storages = [Storage("bt-deploy.xml")])
+class BtDeploySettings : PersistentStateComponent<BtDeploySettings.State> {
+    fun interface Listener {
+        fun settingsChanged()
+
+        companion object {
+            val TOPIC: Topic<Listener> = Topic.create("BtDeploy settings changed", Listener::class.java)
+        }
+    }
+
     class State {
         var panels: MutableList<PanelConfig> = mutableListOf()
         var activePanelId: String = ""
@@ -65,6 +75,10 @@ class BtDeployProjectSettings : PersistentStateComponent<BtDeployProjectSettings
 
     override fun loadState(state: State) {
         myState = state.also(::ensureDefaults)
+    }
+
+    fun notifyChanged() {
+        ApplicationManager.getApplication().messageBus.syncPublisher(Listener.TOPIC).settingsChanged()
     }
 
     private fun ensureDefaults(state: State) {

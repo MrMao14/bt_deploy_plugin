@@ -1,6 +1,7 @@
-package com.jimmy.btdeploy.ui
+package com.mrmao14.btdeploy.ui
 
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.DialogWrapper
 import com.intellij.openapi.ui.ValidationInfo
@@ -11,9 +12,9 @@ import com.intellij.ui.components.JBPasswordField
 import com.intellij.ui.components.JBTextField
 import com.intellij.ui.dsl.builder.Align
 import com.intellij.ui.dsl.builder.panel
-import com.jimmy.btdeploy.api.BtApiException
-import com.jimmy.btdeploy.api.BtClient
-import com.jimmy.btdeploy.settings.BtDeployProjectSettings.PanelConfig
+import com.mrmao14.btdeploy.api.BtApiException
+import com.mrmao14.btdeploy.api.BtClient
+import com.mrmao14.btdeploy.settings.BtDeploySettings.PanelConfig
 import javax.swing.JButton
 import javax.swing.JComponent
 
@@ -94,7 +95,7 @@ class PanelDialog(
         showResult("正在测试连接…", error = false)
         ApplicationManager.getApplication().executeOnPooledThread {
             val failure = runCatching { client.testConnection() }.exceptionOrNull()
-            ApplicationManager.getApplication().invokeLater {
+            ApplicationManager.getApplication().invokeLater({
                 testing = false
                 testButton.isEnabled = true
                 if (failure == null) {
@@ -102,7 +103,7 @@ class PanelDialog(
                 } else {
                     showResult("连接失败：${failure.message?.take(80) ?: "未知错误"}", error = true)
                 }
-            }
+            }, ModalityState.any())
         }
     }
 

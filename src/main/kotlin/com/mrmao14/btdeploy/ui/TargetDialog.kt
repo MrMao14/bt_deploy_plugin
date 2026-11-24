@@ -1,6 +1,7 @@
-package com.jimmy.btdeploy.ui
+package com.mrmao14.btdeploy.ui
 
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.fileChooser.FileChooser
 import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
 import com.intellij.openapi.project.Project
@@ -14,11 +15,11 @@ import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTextField
 import com.intellij.ui.dsl.builder.Align
 import com.intellij.ui.dsl.builder.panel
-import com.jimmy.btdeploy.api.BtApiException
-import com.jimmy.btdeploy.api.BtClient
-import com.jimmy.btdeploy.deploy.RestartType
-import com.jimmy.btdeploy.settings.BtDeployProjectSettings.PanelConfig
-import com.jimmy.btdeploy.settings.BtDeployProjectSettings.TargetConfig
+import com.mrmao14.btdeploy.api.BtApiException
+import com.mrmao14.btdeploy.api.BtClient
+import com.mrmao14.btdeploy.deploy.RestartType
+import com.mrmao14.btdeploy.settings.BtDeploySettings.PanelConfig
+import com.mrmao14.btdeploy.settings.BtDeploySettings.TargetConfig
 import java.awt.Dimension
 import java.awt.GridLayout
 import java.nio.file.Paths
@@ -207,7 +208,7 @@ class TargetDialog(
                 emptyList()
             }
 
-            ApplicationManager.getApplication().invokeLater {
+            ApplicationManager.getApplication().invokeLater({
                 val failure = error
                 loadingOptions = false
                 refreshButton.isEnabled = true
@@ -241,7 +242,7 @@ class TargetDialog(
                     else ->
                         "已读取 ${sites.size} 个网站目录、${projects.size} 个 Java 项目"
                 }
-            }
+            }, ModalityState.any())
         }
     }
 

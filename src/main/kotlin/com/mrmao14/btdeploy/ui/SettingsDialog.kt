@@ -1,5 +1,9 @@
-package com.jimmy.btdeploy.ui
+package com.mrmao14.btdeploy.ui
 
+import com.intellij.openapi.fileChooser.FileChooser
+import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
+import com.intellij.openapi.fileChooser.FileChooserFactory
+import com.intellij.openapi.fileChooser.FileSaverDescriptor
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.DialogWrapper
 import com.intellij.openapi.ui.Messages
@@ -7,21 +11,27 @@ import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBList
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.util.ui.JBUI
-import com.jimmy.btdeploy.settings.BtDeployLogStore
-import com.jimmy.btdeploy.settings.BtDeployProjectSettings
-import com.jimmy.btdeploy.settings.BtDeployProjectSettings.PanelConfig
-import com.jimmy.btdeploy.settings.BtDeployProjectSettings.TargetConfig
+import com.mrmao14.btdeploy.settings.BtDeployLogStore
+import com.mrmao14.btdeploy.settings.BtDeploySettings
+import com.mrmao14.btdeploy.settings.BtDeploySettings.PanelConfig
+import com.mrmao14.btdeploy.settings.BtDeploySettings.TargetConfig
+import com.mrmao14.btdeploy.settings.DeployConfigJson
 import java.awt.BorderLayout
+import java.awt.Component
 import java.awt.FlowLayout
 import java.awt.event.ActionEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
+import java.nio.file.Files
+import java.nio.file.Paths
 import javax.swing.AbstractAction
 import javax.swing.Action
+import javax.swing.DefaultListCellRenderer
 import javax.swing.DefaultListModel
 import javax.swing.JButton
 import javax.swing.JComboBox
 import javax.swing.JComponent
+import javax.swing.JList
 import javax.swing.JPanel
 import javax.swing.JTabbedPane
 import javax.swing.ListSelectionModel
@@ -29,7 +39,7 @@ import javax.swing.ListSelectionModel
 /** 右上角「设置」：管理面板连接和部署配置，修改立即生效。 */
 class SettingsDialog(
     private val project: Project,
-    private val settings: BtDeployProjectSettings,
+    private val settings: BtDeploySettings,
     private val logStore: BtDeployLogStore,
     private val initialPanelId: String,
 ) : DialogWrapper(project) {
@@ -47,6 +57,8 @@ class SettingsDialog(
     private val addTargetButton = JButton("新增配置")
     private val editTargetButton = JButton("编辑")
     private val deleteTargetButton = JButton("删除")
+    private val importConfigButton = JButton("导入配置")
+    private val exportConfigButton = JButton("导出配置")
 
     private val tabs = JTabbedPane()
     private var refreshingCombo = false
@@ -68,6 +80,24 @@ class SettingsDialog(
         targetList.emptyText.text = "该面板还没有部署配置"
         panelList.toolTipText = "双击编辑面板"
         targetList.toolTipText = "双击编辑部署配置"
+        panelList.cellRenderer = object : DefaultListCellRenderer() {
+            override fun getListCellRendererComponent(
+                list: JList<*>?, value: Any?, index: Int, isSelected: Boolean, cellHasFocus: Boolean,
+            ): Component {
+                super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus)
+                if (value is PanelConfig) text = "${value.name}   ${value.panelUrl}"
+                return this
+            }
+        }
+        targetList.cellRenderer = object : DefaultListCellRenderer() {
+            override fun getListCellRendererComponent(
+                list: JList<*>?, value: Any?, index: Int, isSelected: Boolean, cellHasFocus: Boolean,
+            ): Component {
+                super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus)
+                if (value is TargetConfig) text = "${value.name}   ${value.remoteDir}"
+                return this
+            }
+        }
 
         bindEvents()
         refreshPanelList(initialPanelId)
@@ -100,16 +130,22 @@ class SettingsDialog(
         addTargetButton.toolTipText = "在当前面板下新增部署配置"
         editTargetButton.toolTipText = "编辑选中的部署配置"
         deleteTargetButton.toolTipText = "删除选中的部署配置"
+        importConfigButton.toolTipText = "导入历史版本 JSON 配置，同名配置覆盖，其余追加"
+        exportConfigButton.toolTipText = "导出当前面板的配置，文件不包含 API 密钥"
 
         val panelRow = JPanel(BorderLayout(6, 0)).apply {
             add(JBLabel("面板:"), BorderLayout.WEST)
             add(configPanelCombo, BorderLayout.CENTER)
         }
+        val actions = JPanel(BorderLayout(0, 4)).apply {
+            add(buttonRow(addTargetButton, editTargetButton, deleteTargetButton), BorderLayout.NORTH)
+            add(buttonRow(importConfigButton, exportConfigButton), BorderLayout.SOUTH)
+        }
         return JPanel(BorderLayout(0, 6)).apply {
             border = JBUI.Borders.empty(8)
             add(panelRow, BorderLayout.NORTH)
             add(JBScrollPane(targetList), BorderLayout.CENTER)
-            add(buttonRow(addTargetButton, editTargetButton, deleteTargetButton), BorderLayout.SOUTH)
+            add(actions, BorderLayout.SOUTH)
         }
     }
 
@@ -140,6 +176,8 @@ class SettingsDialog(
         addTargetButton.addActionListener { addTarget() }
         editTargetButton.addActionListener { targetList.selectedValue?.let(::editTarget) }
         deleteTargetButton.addActionListener { targetList.selectedValue?.let(::deleteTarget) }
+        importConfigButton.addActionListener { importConfig() }
+        exportConfigButton.addActionListener { exportConfig() }
     }
 
     private fun refreshPanelList(selectId: String? = null) {
@@ -185,21 +223,25 @@ class SettingsDialog(
 
     private fun updateTargetButtons() {
         val selected = targetList.selectedValue
-        addTargetButton.isEnabled = selectedConfigPanel() != null
+        val panel = selectedConfigPanel()
+        addTargetButton.isEnabled = panel != null
         editTargetButton.isEnabled = selected != null
         deleteTargetButton.isEnabled = selected != null
+        importConfigButton.isEnabled = panel != null
+        exportConfigButton.isEnabled = panel != null && targetModel.size() > 0
     }
 
     private fun selectedConfigPanel(): PanelConfig? = configPanelCombo.selectedItem as? PanelConfig
 
     private fun addPanel() {
-        val panel = BtDeployProjectSettings.createPanel(settings.nextPanelName())
+        val panel = BtDeploySettings.createPanel(settings.nextPanelName())
         val names = state.panels.map { it.name }.toSet()
         val dialog = PanelDialog(project, panel, names)
         if (!dialog.showAndGet()) return
         dialog.apply()
 
         state.panels.add(panel)
+        settings.notifyChanged()
         refreshPanelList(panel.id)
         refreshConfigPanelCombo(panel.id)
         refreshTargetList()
@@ -214,6 +256,7 @@ class SettingsDialog(
 
         val index = state.panels.indexOfFirst { it.id == panel.id }
         if (index >= 0) state.panels[index] = edited
+        settings.notifyChanged()
         refreshPanelList(panel.id)
         refreshConfigPanelCombo(panel.id)
         refreshTargetList()
@@ -240,6 +283,7 @@ class SettingsDialog(
         if (state.activePanelId == panel.id) {
             state.activePanelId = state.panels.first().id
         }
+        settings.notifyChanged()
         refreshPanelList()
         refreshConfigPanelCombo()
         refreshTargetList()
@@ -247,13 +291,14 @@ class SettingsDialog(
 
     private fun addTarget() {
         val panel = selectedConfigPanel() ?: return
-        val target = BtDeployProjectSettings.createTarget(panel.id, settings.nextTargetName(panel.id))
+        val target = BtDeploySettings.createTarget(panel.id, settings.nextTargetName(panel.id))
         val names = state.targets.filter { it.panelId == panel.id }.map { it.name }.toSet()
         val dialog = TargetDialog(project, panel, target, names)
         if (!dialog.showAndGet()) return
         dialog.apply()
 
         state.targets.add(target)
+        settings.notifyChanged()
         refreshTargetList(target.id)
     }
 
@@ -270,6 +315,7 @@ class SettingsDialog(
 
         val index = state.targets.indexOfFirst { it.id == target.id }
         if (index >= 0) state.targets[index] = edited
+        settings.notifyChanged()
         refreshTargetList(target.id)
     }
 
@@ -284,6 +330,73 @@ class SettingsDialog(
 
         state.targets.remove(target)
         logStore.clear(target.id)
+        settings.notifyChanged()
         refreshTargetList()
+    }
+
+    private fun importConfig() {
+        val panel = selectedConfigPanel() ?: return
+        val descriptor = FileChooserDescriptorFactory.createSingleFileDescriptor("json")
+            .withTitle("导入部署配置")
+            .withDescription("选择历史版本导出的 JSON 配置文件")
+        val file = FileChooser.chooseFile(descriptor, project, null) ?: return
+
+        val result = try {
+            DeployConfigJson.importTargets(
+                settings,
+                panel,
+                Files.readString(Paths.get(file.path), Charsets.UTF_8),
+            )
+        } catch (e: Exception) {
+            Messages.showErrorDialog(project, "读取失败：${e.message ?: e.javaClass.simpleName}", "导入配置")
+            return
+        }
+
+        if (result == null) {
+            Messages.showWarningDialog(project, "文件里没有 targets 数组", "导入配置")
+            return
+        }
+        if (result.added + result.replaced == 0) {
+            Messages.showWarningDialog(project, "文件里没有可导入的部署配置", "导入配置")
+            return
+        }
+
+        settings.notifyChanged()
+        refreshPanelList(panel.id)
+        refreshConfigPanelCombo(panel.id)
+        refreshTargetList(result.selectedTargetId)
+        val keyNote = if (result.apiKeyImported) "API 密钥已随文件带入" else "API 密钥未导入，请确认面板配置"
+        Messages.showInfoMessage(
+            project,
+            "已导入：新增 ${result.added} 个，覆盖 ${result.replaced} 个。$keyNote。",
+            "导入配置",
+        )
+    }
+
+    private fun exportConfig() {
+        val panel = selectedConfigPanel() ?: return
+        val targets = state.targets.filter { it.panelId == panel.id }
+        if (targets.isEmpty()) {
+            Messages.showInfoMessage(project, "还没有可导出的部署配置", "导出配置")
+            return
+        }
+
+        val descriptor = FileSaverDescriptor("导出部署配置", "选择 JSON 配置保存位置", "json")
+        val file = FileChooserFactory.getInstance()
+            .createSaveFileDialog(descriptor, project)
+            .save(project.basePath?.let { Paths.get(it) }, "bt-deploy-targets.json")
+            ?: return
+
+        try {
+            Files.writeString(file.file.toPath(), DeployConfigJson.export(panel, targets), Charsets.UTF_8)
+        } catch (e: Exception) {
+            Messages.showErrorDialog(project, "导出失败：${e.message ?: e.javaClass.simpleName}", "导出配置")
+            return
+        }
+        Messages.showInfoMessage(
+            project,
+            "已导出 ${targets.size} 个部署配置到 ${file.file.absolutePath}（不含 API 密钥）",
+            "导出配置",
+        )
     }
 }

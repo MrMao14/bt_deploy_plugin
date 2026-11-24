@@ -1,4 +1,4 @@
-package com.jimmy.btdeploy.api
+package com.mrmao14.btdeploy.api
 
 import com.google.gson.Gson
 import com.google.gson.JsonArray
@@ -10,6 +10,8 @@ import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URLEncoder
+import java.nio.file.Files
+import java.nio.file.Path
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
@@ -144,6 +146,48 @@ class BtClient(
                 )
             }
         }.filter { it.name.isNotEmpty() }
+    }
+
+    /** GetFileBody：读取文本日志；大文件可用 reverse 分页读取。 */
+    fun readFile(path: String, mode: String? = null, page: Int = 1): FileBody {
+        val params = buildMap {
+            put("action", "GetFileBody")
+            put("path", path)
+            if (mode != null) {
+                put("mode", mode)
+                put("p", page.toString())
+            }
+        }
+        val data = postForm("/files", params)
+        if (data is JsonObject) {
+            val text = data.string("DATA").ifBlank { data.string("data") }
+            return FileBody(text, data.get("next")?.asBoolean == true)
+        }
+        return FileBody(data.asString, false)
+    }
+
+    /** /download：将服务器上的日志文件整份流式下载到本地。 */
+    fun downloadFile(remotePath: String, localPath: Path) {
+        val conn = open("/download", "GET", mapOf("filename" to remotePath) + sign())
+        try {
+            conn.readTimeout = 600_000
+            val code = conn.responseCode
+            if (code !in 200..299) {
+                val detail = conn.errorStream?.use {
+                    String(it.readNBytes(300), Charsets.UTF_8)
+                }.orEmpty()
+                throw BtApiException("下载失败（HTTP $code）：$detail")
+            }
+            conn.inputStream.use { input ->
+                Files.newOutputStream(localPath).use(input::copyTo)
+            }
+        } catch (e: BtApiException) {
+            throw e
+        } catch (e: IOException) {
+            throw BtApiException("下载日志失败：${e.message}")
+        } finally {
+            conn.disconnect()
+        }
     }
 
     // ------------------------------------------------------------------ 签名 / 请求
@@ -371,6 +415,8 @@ class BtClient(
 }
 
 data class RemoteFile(val name: String, val size: Long, val mtime: Long)
+
+data class FileBody(val text: String, val hasNext: Boolean)
 
 data class SiteInfo(val name: String, val path: String)
 
