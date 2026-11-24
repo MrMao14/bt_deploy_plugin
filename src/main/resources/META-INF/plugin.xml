@@ -1,12 +1,9 @@
 <idea-plugin>
     <id>com.mrmao14.btdeploy</id>
-    <name>宝塔部署</name>
+    <name>BT Deploy</name>
     <vendor url="https://github.com/MrMao14">MrMao14</vendor>
 
-    <description><![CDATA[
-        在 IDEA 右侧工具栏把打包产物一键上传到宝塔面板服务器：打包 → 上传 → 解压 → 重启。
-        顶部选择面板，部署配置以卡片展示服务状态和操作，底部固定日志并支持下载，支持 IDEA Build 后自动部署和远程备份。
-    ]]></description>
+    <description>BT Deploy is an IntelliJ IDEA plugin that uploads build artifacts to a BT Panel server in one click, then unzips and restarts the configured service.</description>
 
     <depends>com.intellij.modules.platform</depends>
 
