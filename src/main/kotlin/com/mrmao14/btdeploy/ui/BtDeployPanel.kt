@@ -4,11 +4,9 @@ import com.intellij.icons.AllIcons
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.application.ApplicationManager
-import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.progress.ProgressIndicator
 import com.intellij.openapi.progress.Task
 import com.intellij.openapi.project.Project
-import com.intellij.task.ProjectTaskManager
 import com.intellij.openapi.ui.Messages
 import com.intellij.ui.JBColor
 import com.intellij.ui.components.JBLabel
@@ -17,8 +15,10 @@ import com.intellij.util.ui.JBUI
 import com.intellij.util.ui.UIUtil
 import com.mrmao14.btdeploy.api.BtApiException
 import com.mrmao14.btdeploy.api.BtClient
+import com.mrmao14.btdeploy.deploy.BuildType
 import com.mrmao14.btdeploy.deploy.DeployConfig
 import com.mrmao14.btdeploy.deploy.Deployer
+import com.mrmao14.btdeploy.deploy.ProjectBuilder
 import com.mrmao14.btdeploy.deploy.RestartType
 import com.mrmao14.btdeploy.deploy.StatusService
 import com.mrmao14.btdeploy.deploy.TargetState
@@ -28,18 +28,18 @@ import com.mrmao14.btdeploy.settings.BtDeploySettings
 import com.mrmao14.btdeploy.settings.BtDeploySettings.Listener
 import com.mrmao14.btdeploy.settings.BtDeploySettings.PanelConfig
 import com.mrmao14.btdeploy.settings.BtDeploySettings.TargetConfig
-import org.jetbrains.concurrency.Promise
 import java.awt.BorderLayout
 import java.awt.Dimension
 import java.awt.FlowLayout
 import java.awt.Font
 import java.awt.LayoutManager
 import java.awt.Rectangle
+import java.nio.file.Files
+import java.nio.file.Path
 import java.nio.file.Paths
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.swing.Box
 import javax.swing.BoxLayout
@@ -207,7 +207,9 @@ class BtDeployPanel(private val project: Project) {
                         status = targetStatuses[target.id],
                         selected = target.id == state.selectedTargetId,
                         enabled = !busy.get(),
+                        buildEnabled = target.buildEnabled,
                         onSelect = { selectTarget(target.id) },
+                        onBuildToggle = { target.buildEnabled = it },
                         onDeploy = { buildFirst ->
                             selectTarget(target.id)
                             deploy(target, buildFirst)
@@ -345,7 +347,7 @@ class BtDeployPanel(private val project: Project) {
     private fun deploy(target: TargetConfig, buildFirst: Boolean) {
         if (busy.get()) return
         val panel = activePanel() ?: return warn(target, "请先选择面板")
-        if (target.localPaths.isEmpty()) return warn(target, "请先给部署配置添加本地路径")
+        if (target.localPaths.isEmpty() && !buildFirst) return warn(target, "请先给部署配置添加本地路径")
         if (target.remoteDir.isBlank()) return warn(target, "请先填写远程目录")
 
         val client = try {
@@ -359,29 +361,44 @@ class BtDeployPanel(private val project: Project) {
         refreshTargets()
         prepareLogFor(target)
 
-        val config = deployConfig(target)
         val title = if (buildFirst) "打包并部署" else "部署"
         appendLog(target, "===== $title：${target.name} =====")
 
-        runTask(title, target, if (buildFirst) "打包并部署完成 ✅" else "部署完成 ✅") { log ->
+        runTask(title, target, if (buildFirst) "打包并部署完成 ✅" else "部署完成 ✅") { indicator, log ->
+            var builtArtifact: Path? = null
             if (buildFirst) {
-                log("正在执行 IDEA Build…")
-                buildProject()
-                log("IDEA Build 完成")
+                log("正在构建…")
+                builtArtifact = ProjectBuilder.build(project, BuildType.from(target.buildType), target.frontendDir, indicator, log)
+                log("构建完成")
+            }
+
+            val config = deployConfig(target, builtArtifact)
+            if (config.sources.isEmpty()) {
+                throw BtApiException("没有可部署的内容：请添加本地路径，或把构建方式设为 Maven / Gradle / 前端 build")
             }
             Deployer.deploy(client, config, log)
         }
     }
 
-    private fun deployConfig(target: TargetConfig): DeployConfig =
-        DeployConfig(
-            sources = target.localPaths.map { Paths.get(it) },
+    private fun deployConfig(target: TargetConfig, builtArtifact: Path? = null): DeployConfig {
+        val paths = target.localPaths.map { Paths.get(it) }.toMutableList()
+        if (builtArtifact != null) {
+            // 配置的目录已包含产物时不再追加，否则用本次构建的 jar / 前端产物替换配置里的 jar
+            val covered = paths.any { Files.isDirectory(it) && builtArtifact.startsWith(it) }
+            if (!covered) {
+                paths.removeAll { it.fileName.toString().endsWith(".jar", true) }
+                paths.add(builtArtifact)
+            }
+        }
+        return DeployConfig(
+            sources = paths,
             remoteDir = target.remoteDir,
             keepRoot = target.keepRoot,
             restart = RestartType.from(target.restartType),
             serviceName = target.serviceName,
             projectName = target.javaProjectName,
         )
+    }
 
     private fun serviceAction(target: TargetConfig, operation: String, label: String) {
         if (busy.get()) return
@@ -406,7 +423,7 @@ class BtDeployPanel(private val project: Project) {
         prepareLogFor(target)
         val title = "$label ${target.name}"
         appendLog(target, "===== $title =====")
-        runTask(title, target, "${label}完成 ✅") { log ->
+        runTask(title, target, "${label}完成 ✅") { _, log ->
             if (java) {
                 client.javaProjectAction(name, operation)
                 log("      已${label}Java 项目 $name")
@@ -475,7 +492,7 @@ class BtDeployPanel(private val project: Project) {
                 prepareLogFor(target)
                 appendLog(target, "===== 还原备份：${backup.name} =====")
                 val config = deployConfig(target)
-                runTask("还原备份", target, "还原完成 ✅") { log ->
+                runTask("还原备份", target, "还原完成 ✅") { _, log ->
                     Deployer.restoreBackup(client, config, backup.name, log)
                 }
             }
@@ -488,33 +505,11 @@ class BtDeployPanel(private val project: Project) {
         logArea.caretPosition = logArea.document.length
     }
 
-    /** 调用 IDEA 的 Build Project（构建全部模块），失败时抛异常阻止后续上传。 */
-    private fun buildProject() {
-        var promise: Promise<ProjectTaskManager.Result>? = null
-        try {
-            app.invokeAndWait {
-                FileDocumentManager.getInstance().saveAllDocuments()
-                promise = ProjectTaskManager.getInstance(project).buildAllModules()
-            }
-        } catch (e: Exception) {
-            throw BtApiException("无法启动 IDEA Build：${e.message}")
-        }
-
-        val result = try {
-            promise!!.blockingGet(30, TimeUnit.MINUTES)
-        } catch (e: Exception) {
-            throw BtApiException("IDEA Build 执行失败：${e.message}")
-        } ?: throw BtApiException("IDEA Build 未返回结果")
-
-        if (result.isAborted) throw BtApiException("IDEA Build 已取消")
-        if (result.hasErrors()) throw BtApiException("IDEA Build 失败，请先修复编译错误")
-    }
-
     private fun runTask(
         title: String,
         target: TargetConfig,
         successMessage: String,
-        block: (log: (String) -> Unit) -> Unit,
+        block: (indicator: ProgressIndicator, log: (String) -> Unit) -> Unit,
     ) {
         if (!busy.compareAndSet(false, true)) return
         refreshTargets()
@@ -524,7 +519,7 @@ class BtDeployPanel(private val project: Project) {
             override fun run(indicator: ProgressIndicator) {
                 var error: Exception? = null
                 try {
-                    block(log)
+                    block(indicator, log)
                 } catch (e: Exception) {
                     error = e
                 }

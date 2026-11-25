@@ -48,6 +48,10 @@ class BtDeploySettings : PersistentStateComponent<BtDeploySettings.State> {
         var panelId: String = ""
         var name: String = ""
         var localPaths: MutableList<String> = mutableListOf()
+        var buildType: String = "AUTO"
+        var deployType: String = ""
+        var buildEnabled: Boolean = true
+        var frontendDir: String = ""
         var remoteDir: String = ""
         var keepRoot: Boolean = true
         var restartType: String = "NONE"
@@ -59,6 +63,10 @@ class BtDeploySettings : PersistentStateComponent<BtDeploySettings.State> {
             it.panelId = panelId
             it.name = name
             it.remoteDir = remoteDir
+            it.buildType = buildType
+            it.deployType = deployType
+            it.buildEnabled = buildEnabled
+            it.frontendDir = frontendDir
             it.keepRoot = keepRoot
             it.restartType = restartType
             it.serviceName = serviceName

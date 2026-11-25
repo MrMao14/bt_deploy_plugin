@@ -6,6 +6,7 @@
     <description>BT Deploy is an IntelliJ IDEA plugin that uploads build artifacts to a BT Panel server in one click, then unzips and restarts the configured service.</description>
 
     <depends>com.intellij.modules.platform</depends>
+    <depends optional="true">org.jetbrains.idea.maven</depends>
 
     <extensions defaultExtensionNs="com.intellij">
         <toolWindow id="宝塔部署"

@@ -5,6 +5,7 @@ import com.google.gson.JsonArray
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import com.mrmao14.btdeploy.deploy.BuildType
 import com.mrmao14.btdeploy.deploy.RestartType
 import com.mrmao14.btdeploy.settings.BtDeploySettings.PanelConfig
 import com.mrmao14.btdeploy.settings.BtDeploySettings.TargetConfig
@@ -21,6 +22,10 @@ object DeployConfigJson {
     private data class TargetData(
         val name: String,
         val localPaths: List<String>,
+        val buildType: String,
+        val deployType: String,
+        val buildEnabled: Boolean,
+        val frontendDir: String,
         val remoteDir: String,
         val keepRoot: Boolean,
         val restartType: String,
@@ -84,6 +89,10 @@ object DeployConfigJson {
         return JsonObject().apply {
             addProperty("name", target.name)
             add("source_dirs", JsonArray().apply { target.localPaths.forEach { add(it) } })
+            addProperty("build_type", BuildType.from(target.buildType).name.lowercase())
+            addProperty("deploy_type", target.deployType.lowercase())
+            addProperty("build_enabled", target.buildEnabled)
+            addProperty("frontend_dir", target.frontendDir)
             addProperty("keep_root", target.keepRoot)
             addProperty("remote_dir", target.remoteDir)
             add("restart", JsonObject().apply {
@@ -111,6 +120,10 @@ object DeployConfigJson {
         return TargetData(
             name = name,
             localPaths = sourceDirs,
+            buildType = BuildType.from(obj.text("build_type")?.uppercase()).name,
+            deployType = obj.text("deploy_type")?.uppercase().orEmpty(),
+            buildEnabled = obj.bool("build_enabled") ?: true,
+            frontendDir = obj.text("frontend_dir").orEmpty(),
             remoteDir = obj.text("remote_dir").orEmpty(),
             keepRoot = obj.bool("keep_root") ?: true,
             restartType = restartType(wireType).name,
@@ -121,6 +134,10 @@ object DeployConfigJson {
 
     private fun TargetConfig.apply(data: TargetData) {
         localPaths = data.localPaths.toMutableList()
+        buildType = data.buildType
+        deployType = data.deployType
+        buildEnabled = data.buildEnabled
+        frontendDir = data.frontendDir
         remoteDir = data.remoteDir
         keepRoot = data.keepRoot
         restartType = data.restartType

@@ -180,6 +180,9 @@ class TargetLogDialog(
 
     override fun createActions(): Array<Action> = arrayOf(downloadAction, closeAction)
 
+    /** 打开时把焦点交给日志控制台，避免「自动换行」复选框首次显示成焦点高亮。 */
+    override fun getPreferredFocusedComponent(): JComponent = logView.component
+
     override fun dispose() {
         disposed = true
         autoRefreshTimer.stop()

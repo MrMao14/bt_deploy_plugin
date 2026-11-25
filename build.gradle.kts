@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "com.mrmao14"
-version = "0.5.3"
+version = "0.6.0"
 
 repositories {
     mavenCentral()
@@ -24,6 +24,7 @@ dependencies {
         }.getProperty("platformLocalPath")?.takeIf { it.isNotBlank() }
 
         if (localPath != null) local(localPath) else intellijIdea("2026.3")
+        bundledPlugin("org.jetbrains.idea.maven")
     }
 }
 

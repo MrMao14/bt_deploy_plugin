@@ -5,6 +5,7 @@ import com.intellij.ui.components.JBCheckBox
 import com.intellij.ui.components.JBLabel
 import com.intellij.util.ui.JBUI
 import com.intellij.util.ui.UIUtil
+import com.mrmao14.btdeploy.deploy.BuildType
 import com.mrmao14.btdeploy.deploy.RestartType
 import com.mrmao14.btdeploy.deploy.TargetState
 import com.mrmao14.btdeploy.deploy.TargetStatus
@@ -34,8 +35,10 @@ class TargetCard(
     status: TargetStatus?,
     selected: Boolean,
     enabled: Boolean,
+    buildEnabled: Boolean,
     onSelect: () -> Unit,
     onDeploy: (Boolean) -> Unit,
+    onBuildToggle: (Boolean) -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
     onRestart: () -> Unit,
@@ -107,9 +110,10 @@ class TargetCard(
 
         val compact = Insets(3, 8, 3, 8)
         val buildCheckBox = JBCheckBox("打包").apply {
-            isSelected = true
+            isSelected = buildEnabled
             isEnabled = enabled
-            toolTipText = "勾选后先执行 IDEA Build，成功后再部署"
+            toolTipText = "勾选后先按「构建方式」打包，成功后再部署"
+            addActionListener { onBuildToggle(isSelected) }
         }
         val deployButton = JButton("部署").apply {
             isEnabled = enabled
@@ -185,7 +189,7 @@ class TargetCard(
             RestartType.JAVA_RESTART -> target.javaProjectName.trim()
             else -> ""
         }
-        val base = "${target.localPaths.size} 个路径 · ${type.label}"
+        val base = "${target.localPaths.size} 个路径 · ${BuildType.from(target.buildType).label} · ${type.label}"
         return elide(if (extra.isBlank()) base else "$base · $extra")
     }
 

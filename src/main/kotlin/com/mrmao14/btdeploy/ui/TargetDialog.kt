@@ -14,9 +14,11 @@ import com.intellij.ui.components.JBList
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTextField
 import com.intellij.ui.dsl.builder.Align
+import com.intellij.ui.dsl.builder.Row
 import com.intellij.ui.dsl.builder.panel
 import com.mrmao14.btdeploy.api.BtApiException
 import com.mrmao14.btdeploy.api.BtClient
+import com.mrmao14.btdeploy.deploy.BuildType
 import com.mrmao14.btdeploy.deploy.RestartType
 import com.mrmao14.btdeploy.settings.BtDeploySettings.PanelConfig
 import com.mrmao14.btdeploy.settings.BtDeploySettings.TargetConfig
@@ -44,10 +46,19 @@ class TargetDialog(
     private val refreshButton = JButton("刷新")
     private val dataHint = JBLabel()
     private val keepRootBox = JBCheckBox("保留目录名").apply { isSelected = target.keepRoot }
+    private val buildTypeCombo = JComboBox<BuildType>()
+    private val deployTypeCombo = JComboBox(DeployType.entries.toTypedArray())
+    private val frontendDirField = JBTextField(target.frontendDir)
+    private val frontendDirButton = JButton("选择")
     private val restartCombo = JComboBox(RestartType.entries.toTypedArray())
     private val addDirButton = JButton("添加目录")
     private val addFileButton = JButton("添加文件")
     private val removeButton = JButton("移除")
+
+    private lateinit var buildTypeRow: Row
+    private lateinit var frontendDirRow: Row
+    private lateinit var javaProjectRow: Row
+    private lateinit var serviceNameRow: Row
 
     private val javaProjectPaths = mutableMapOf<String, String>()
     private var updatingOptions = false
@@ -55,6 +66,11 @@ class TargetDialog(
 
     init {
         target.localPaths.forEach(pathModel::addElement)
+        val deployType = initialDeployType(target)
+        deployTypeCombo.selectedItem = deployType
+        buildTypeOptions(deployType).forEach(buildTypeCombo::addItem)
+        buildTypeCombo.selectedItem =
+            BuildType.from(target.buildType).takeIf { it in buildTypeOptions(deployType) } ?: BuildType.AUTO
         restartCombo.selectedItem = RestartType.from(target.restartType)
 
         COMMON_SERVICES.forEach(serviceNameCombo::addItem)
@@ -64,20 +80,22 @@ class TargetDialog(
 
         title = "部署配置"
         init()
-        setSize(700, 470)
+        setSize(700, 560)
 
         restartCombo.addActionListener { updateRestartFields() }
+        deployTypeCombo.addActionListener { updateDeployTypeFields() }
         addDirButton.addActionListener { choosePath(directory = true) }
         addFileButton.addActionListener { choosePath(directory = false) }
         removeButton.addActionListener { removeSelectedPaths() }
         refreshButton.addActionListener { loadPanelOptions() }
+        frontendDirButton.addActionListener { chooseFrontendDir() }
         javaProjectCombo.addActionListener {
             if (updatingOptions) return@addActionListener
             val path = javaProjectPaths[javaProjectCombo.value()]
             if (!path.isNullOrBlank()) setComboValue(remoteDirCombo, path)
         }
 
-        updateRestartFields()
+        updateDeployTypeFields()
         loadPanelOptions()
     }
 
@@ -90,6 +108,10 @@ class TargetDialog(
         javaProjectCombo.toolTipText = "选择 Java 项目后自动填入项目目录"
         serviceNameCombo.toolTipText = "常用系统服务，也可以直接输入"
         refreshButton.toolTipText = "重新从面板读取网站目录和 Java 项目"
+        deployTypeCombo.toolTipText = "Java 项目按构建方式打包 jar；前端执行 package.json 的 build；其他用于系统服务类部署"
+        buildTypeCombo.toolTipText = "自动识别：有 pom.xml 用 Maven，有 build.gradle 用 Gradle；IDEA Build 只编译不打 jar"
+        frontendDirField.toolTipText = "前端项目目录，相对 IDEA 项目根目录；留空表示项目根目录"
+        frontendDirButton.toolTipText = "选择前端项目目录"
 
         val pathButtons = JPanel(GridLayout(3, 1, 0, 4)).apply {
             add(addDirButton)
@@ -98,8 +120,35 @@ class TargetDialog(
         }
 
         return panel {
+            row("部署类型:") {
+                cell(deployTypeCombo)
+            }
             row("名称:") {
                 cell(nameField).align(Align.FILL).resizableColumn()
+            }
+            javaProjectRow = row("项目名称:") {
+                cell(javaProjectCombo).align(Align.FILL).resizableColumn()
+            }
+            row("部署后动作:") {
+                cell(restartCombo)
+            }
+            serviceNameRow = row("服务名:") {
+                cell(serviceNameCombo).align(Align.FILL).resizableColumn()
+            }
+            buildTypeRow = row("构建方式:") {
+                cell(buildTypeCombo)
+                cell(JBLabel("构建成功后再部署产物").apply {
+                    foreground = JBColor.GRAY
+                    font = font.deriveFont(11f)
+                })
+            }
+            frontendDirRow = row("前端目录:") {
+                cell(frontendDirField).align(Align.FILL).resizableColumn()
+                cell(frontendDirButton)
+                cell(JBLabel("相对项目根目录，留空为根目录").apply {
+                    foreground = JBColor.GRAY
+                    font = font.deriveFont(11f)
+                })
             }
             row("本地路径:") {
                 cell(JBScrollPane(pathList).apply { preferredSize = Dimension(0, 96) })
@@ -116,15 +165,6 @@ class TargetDialog(
             row {
                 cell(keepRootBox)
             }
-            row("部署后动作:") {
-                cell(restartCombo)
-            }
-            row("服务名:") {
-                cell(serviceNameCombo).align(Align.FILL).resizableColumn()
-            }
-            row("Java 项目:") {
-                cell(javaProjectCombo).align(Align.FILL).resizableColumn()
-            }
         }
     }
 
@@ -138,6 +178,14 @@ class TargetDialog(
     fun apply() {
         target.name = nameField.text.trim()
         target.localPaths = (0 until pathModel.size()).mapTo(mutableListOf()) { pathModel.get(it) }
+        val type = selectedDeployType()
+        target.deployType = type.name
+        target.buildType = if (type == DeployType.FRONTEND) {
+            BuildType.FRONTEND.name
+        } else {
+            (buildTypeCombo.selectedItem as? BuildType ?: BuildType.AUTO).name
+        }
+        target.frontendDir = frontendDirField.text.trim()
         target.remoteDir = remoteDirCombo.value()
         target.keepRoot = keepRootBox.isSelected
         target.restartType = (restartCombo.selectedItem as RestartType).name
@@ -163,12 +211,71 @@ class TargetDialog(
         }
     }
 
+    private fun chooseFrontendDir() {
+        val file = FileChooser.chooseFile(
+            FileChooserDescriptorFactory.singleDir().withTitle("选择前端项目目录"),
+            project,
+            null,
+        ) ?: return
+        val path = Paths.get(file.path).toAbsolutePath().normalize()
+        val base = project.basePath?.let { Paths.get(it).toAbsolutePath().normalize() }
+        frontendDirField.text = runCatching { base?.relativize(path)?.toString() }
+            .getOrNull()?.takeIf { it.isNotBlank() } ?: path.toString()
+    }
+
     private fun removeSelectedPaths() {
         pathList.selectedValuesList.forEach(pathModel::removeElement)
     }
 
+    private fun updateDeployTypeFields() {
+        val type = selectedDeployType()
+        javaProjectRow.visible(type == DeployType.JAVA)
+        buildTypeRow.visible(type != DeployType.FRONTEND)
+        frontendDirRow.visible(type == DeployType.FRONTEND)
+        serviceNameRow.visible(type == DeployType.OTHER)
+
+        if (type != DeployType.FRONTEND) {
+            val options = buildTypeOptions(type)
+            val current = buildTypeCombo.selectedItem as? BuildType
+            val items = (0 until buildTypeCombo.itemCount).map { buildTypeCombo.getItemAt(it) }
+            if (items != options) {
+                buildTypeCombo.removeAllItems()
+                options.forEach(buildTypeCombo::addItem)
+                buildTypeCombo.selectedItem = current?.takeIf { it in options } ?: BuildType.AUTO
+            }
+        }
+
+        val selected = restartCombo.selectedItem as? RestartType ?: RestartType.NONE
+        val options = restartOptions(type)
+        restartCombo.removeAllItems()
+        options.forEach(restartCombo::addItem)
+        restartCombo.selectedItem = if (selected in options) selected else RestartType.NONE
+        updateRestartFields()
+    }
+
+    private fun selectedDeployType(): DeployType =
+        deployTypeCombo.selectedItem as? DeployType ?: DeployType.JAVA
+
+    private fun initialDeployType(target: TargetConfig): DeployType = when {
+        target.deployType.isNotBlank() -> DeployType.from(target.deployType)
+        BuildType.from(target.buildType) == BuildType.FRONTEND -> DeployType.FRONTEND
+        else -> DeployType.JAVA
+    }
+
+    private fun buildTypeOptions(type: DeployType): List<BuildType> = when (type) {
+        DeployType.JAVA -> listOf(BuildType.AUTO, BuildType.IDEA, BuildType.MAVEN, BuildType.GRADLE)
+        DeployType.OTHER -> listOf(BuildType.AUTO, BuildType.IDEA)
+        DeployType.FRONTEND -> emptyList()
+    }
+
+    private fun restartOptions(type: DeployType): List<RestartType> = when (type) {
+        DeployType.JAVA -> RestartType.entries.filter { it != RestartType.SERVICE_RESTART }
+        DeployType.FRONTEND -> listOf(RestartType.NONE, RestartType.WEBSERVER_RELOAD)
+        DeployType.OTHER -> RestartType.entries.filter { it != RestartType.JAVA_RESTART }
+    }
+
     private fun updateRestartFields() {
-        val type = restartCombo.selectedItem as RestartType
+        val type = restartCombo.selectedItem as? RestartType ?: RestartType.NONE
         serviceNameCombo.isEnabled = type == RestartType.SERVICE_RESTART
     }
 
@@ -270,5 +377,18 @@ class TargetDialog(
             "nginx", "apache", "httpd", "mysqld", "mysql", "mariadb",
             "redis", "memcached", "tomcat", "php-fpm", "pure-ftpd",
         )
+    }
+}
+
+/** 部署类型只影响界面：Java 显示项目名称和构建方式，前端固定走 package.json 的 build，其他用于系统服务。 */
+private enum class DeployType(val label: String) {
+    JAVA("Java"),
+    FRONTEND("前端"),
+    OTHER("其他");
+
+    override fun toString() = label
+
+    companion object {
+        fun from(value: String?): DeployType = entries.firstOrNull { it.name == value } ?: JAVA
     }
 }
