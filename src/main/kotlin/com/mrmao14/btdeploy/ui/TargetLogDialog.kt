@@ -427,6 +427,6 @@ class TargetLogDialog(
     private fun time(): String = SimpleDateFormat("HH:mm:ss", Locale.ROOT).format(Date())
 
     private companion object {
-        const val MAX_READ_SIZE = 10L * 1024 * 1024
+        const val MAX_READ_SIZE = 3L * 1024 * 1024
     }
 }
