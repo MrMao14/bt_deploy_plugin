@@ -1,30 +1,33 @@
 package com.mrmao14.btdeploy.ui
 
 import com.intellij.execution.ui.ConsoleViewContentType
+import com.intellij.execution.filters.TextConsoleBuilderFactory
+import com.intellij.execution.impl.ConsoleViewImpl
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
+import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.fileChooser.FileChooserFactory
 import com.intellij.openapi.fileChooser.FileSaverDescriptor
+import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.DialogWrapper
-import com.intellij.openapi.editor.colors.EditorColorsManager
+import com.intellij.openapi.util.Disposer
+import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.ui.JBColor
 import com.intellij.ui.components.JBCheckBox
 import com.intellij.ui.components.JBLabel
-import com.intellij.ui.components.JBScrollPane
-import com.intellij.ui.components.JBTextField
 import com.intellij.util.ui.JBUI
-import com.intellij.util.ui.UIUtil
 import com.mrmao14.btdeploy.api.BtClient
 import com.mrmao14.btdeploy.api.RemoteFile
 import com.mrmao14.btdeploy.settings.BtDeploySettings.TargetConfig
 import java.awt.BorderLayout
 import java.awt.Dimension
 import java.awt.FlowLayout
-import java.awt.Font
-import java.awt.GridLayout
 import java.awt.Rectangle
 import java.awt.event.ActionEvent
+import java.awt.event.WindowAdapter
+import java.awt.event.WindowEvent
+import java.nio.file.Files
 import java.nio.file.Paths
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -35,17 +38,10 @@ import javax.swing.JButton
 import javax.swing.JComboBox
 import javax.swing.JComponent
 import javax.swing.JPanel
-import javax.swing.JTextPane
 import javax.swing.KeyStroke
-import javax.swing.Scrollable
 import javax.swing.Timer
-import javax.swing.event.DocumentEvent
-import javax.swing.event.DocumentListener
-import javax.swing.text.DefaultHighlighter
-import javax.swing.text.SimpleAttributeSet
-import javax.swing.text.StyleConstants
 
-/** 查看服务器项目日志，使用 IDEA 控制台配色并支持搜索、字号和全屏。 */
+/** 查看服务器项目日志，使用 IDEA 原生控制台高亮和搜索框。 */
 class TargetLogDialog(
     private val project: Project,
     private val target: TargetConfig,
@@ -55,16 +51,19 @@ class TargetLogDialog(
     private val logsDir = "${target.remoteDir.trimEnd('/')}/logs"
     private val fileCombo = JComboBox<String>()
     private val refreshButton = JButton("刷新")
+    private val openInEditorButton = JButton("用 IDEA 打开")
     private val autoRefreshBox = JBCheckBox("自动刷新")
-    private val searchField = JBTextField()
-    private val searchPrevButton = JButton("上一个")
-    private val searchNextButton = JButton("下一个")
-    private val hitsLabel = JBLabel()
-    private val decreaseFontButton = JButton("A−")
-    private val increaseFontButton = JButton("A+")
+    private val softWrapBox = JBCheckBox("自动换行", true)
     private val fullscreenButton = JButton("全屏")
     private val statusLabel = JBLabel("正在读取日志列表…")
-    private val logPane = LogTextPane()
+    private val logViewDisposable = Disposer.newDisposable()
+    private val logView = TextConsoleBuilderFactory.getInstance()
+        .createBuilder(project)
+        .apply {
+            setViewer(true)
+            setUseOwnModalityStateForUpdates(true)
+        }
+        .console
     private val prevButton = JButton("<")
     private val nextButton = JButton(">")
 
@@ -75,34 +74,17 @@ class TargetLogDialog(
     private var loading = false
     private var updatingFiles = false
     private var disposed = false
-    private var fontSize = 13
     private var fullscreen = false
     private var fullscreenBounds: Rectangle? = null
-    private var searchHits: List<IntRange> = emptyList()
-    private var searchIndex = -1
-    private var searchLimitReached = false
-    private var currentSearchHighlight: Any? = null
 
     private val autoRefreshTimer = Timer(5_000) { loadFile(page = 1) }
-    private val searchTimer = Timer(250) { rebuildSearchHighlights() }.apply { isRepeats = false }
-    private val searchPainter = DefaultHighlighter.DefaultHighlightPainter(
-        JBColor(0xD6E8FF, 0x264F78),
-    )
-    private val currentSearchPainter = DefaultHighlighter.DefaultHighlightPainter(
-        JBColor(0xFFE082, 0x806000),
-    )
-    private val normalAttributes = logAttributes(ConsoleViewContentType.NORMAL_OUTPUT)
-    private val logStyleRules = listOf(
-        Regex("""\b(?:ERROR|FATAL|SEVERE)\b|Exception|Caused by""", RegexOption.IGNORE_CASE) to
-            logAttributes(ConsoleViewContentType.LOG_ERROR_OUTPUT),
-        Regex("""\bWARN(?:ING)?\b""", RegexOption.IGNORE_CASE) to
-            logAttributes(ConsoleViewContentType.LOG_WARNING_OUTPUT),
-        Regex("""\b(?:INFO|INFORMATION)\b""", RegexOption.IGNORE_CASE) to
-            logAttributes(ConsoleViewContentType.LOG_INFO_OUTPUT),
-        Regex("""\b(?:DEBUG|TRACE|VERBOSE)\b""", RegexOption.IGNORE_CASE) to
-            logAttributes(ConsoleViewContentType.LOG_DEBUG_OUTPUT),
-        Regex("""\b\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?\b""") to
-            logAttributes(ConsoleViewContentType.SYSTEM_OUTPUT),
+    private val logTokenRegex = Regex(
+        """(?<timestamp>\b\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?\b)""" +
+            """|(?<error>\b(?:ERROR|FATAL|SEVERE)\b|Exception|Caused by)""" +
+            """|(?<warning>\bWARN(?:ING)?\b)""" +
+            """|(?<info>\b(?:INFO|INFORMATION)\b)""" +
+            """|(?<debug>\b(?:DEBUG|TRACE|VERBOSE)\b)""",
+        RegexOption.IGNORE_CASE,
     )
 
     private val downloadAction = object : AbstractAction("下载日志") {
@@ -121,85 +103,66 @@ class TargetLogDialog(
 
     init {
         title = "项目日志 - ${target.name}"
+        Disposer.register(logViewDisposable, logView)
         init()
+        window.addWindowListener(object : WindowAdapter() {
+            override fun windowOpened(e: WindowEvent) {
+                applySoftWrap()
+                refreshFiles()
+            }
+        })
         setSize(980, 680)
         isResizable = true
 
         installShortcuts()
         refreshButton.addActionListener { refreshFiles() }
-        fileCombo.addActionListener { if (!updatingFiles) loadFile() }
+        fileCombo.addActionListener {
+            if (!updatingFiles) {
+                currentFile = files.getOrNull(fileCombo.selectedIndex)
+                loadFile()
+            }
+        }
         prevButton.addActionListener { loadFile(currentPage - 1) }
         nextButton.addActionListener { loadFile(currentPage + 1) }
         autoRefreshBox.addActionListener {
             if (autoRefreshBox.isSelected) autoRefreshTimer.start() else autoRefreshTimer.stop()
         }
-        searchField.addActionListener { findNext() }
-        searchNextButton.addActionListener { findNext() }
-        searchPrevButton.addActionListener { findPrevious() }
-        decreaseFontButton.addActionListener { changeFontSize(-1) }
-        increaseFontButton.addActionListener { changeFontSize(1) }
+        softWrapBox.addActionListener { applySoftWrap() }
         fullscreenButton.addActionListener { toggleFullscreen() }
-        searchField.document.addDocumentListener(object : DocumentListener {
-            override fun insertUpdate(e: DocumentEvent) = scheduleSearch()
-            override fun removeUpdate(e: DocumentEvent) = scheduleSearch()
-            override fun changedUpdate(e: DocumentEvent) = scheduleSearch()
-        })
-        applyFontSize()
-        refreshFiles()
+        openInEditorButton.addActionListener { openInEditor() }
     }
 
     override fun createCenterPanel(): JComponent {
         fileCombo.toolTipText = "选择要查看的服务器日志文件"
         refreshButton.toolTipText = "重新读取日志文件列表"
+        openInEditorButton.toolTipText = "下载为临时 .log 文件，用 IDEA 原生日志语法高亮和搜索打开"
         autoRefreshBox.toolTipText = "每 5 秒刷新当前日志"
-        searchField.emptyText.text = "搜索日志（Ctrl+F）"
-        searchPrevButton.toolTipText = "上一个匹配项"
-        searchNextButton.toolTipText = "下一个匹配项"
-        decreaseFontButton.toolTipText = "减小日志字号"
-        increaseFontButton.toolTipText = "增大日志字号"
+        softWrapBox.toolTipText = "自动换行；关闭后可左右滚动查看完整日志行"
         fullscreenButton.toolTipText = "全屏查看（F11）"
+        logView.component.toolTipText = "使用 IDEA 原生控制台显示日志，支持滚轮滚动和 Ctrl+F 搜索"
         prevButton.toolTipText = "查看更新的日志分段"
         nextButton.toolTipText = "查看更早的日志分段"
-        hitsLabel.foreground = JBColor.GRAY
         statusLabel.foreground = JBColor.GRAY
-        logPane.apply {
-            isEditable = false
-            background = EditorColorsManager.getInstance().globalScheme
-                .getColor(ConsoleViewContentType.CONSOLE_BACKGROUND_KEY)
-                ?: UIUtil.getPanelBackground()
-        }
 
         val directoryLabel = JBLabel("日志目录：$logsDir").apply { foreground = JBColor.GRAY }
         val fileTools = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
             add(refreshButton)
+            add(openInEditorButton)
             add(autoRefreshBox)
+            add(softWrapBox)
         }
         val selector = JPanel(BorderLayout(6, 0)).apply {
             add(fileCombo, BorderLayout.CENTER)
             add(fileTools, BorderLayout.EAST)
         }
-        val searchTools = JPanel(FlowLayout(FlowLayout.LEFT, 4, 0)).apply {
-            add(searchPrevButton)
-            add(searchNextButton)
-            add(hitsLabel)
-            add(decreaseFontButton)
-            add(increaseFontButton)
-            add(fullscreenButton)
-        }
-        val searchBar = JPanel(BorderLayout(6, 0)).apply {
-            add(searchField, BorderLayout.CENTER)
-            add(searchTools, BorderLayout.EAST)
-        }
         val top = JPanel(BorderLayout(0, 4)).apply {
             add(directoryLabel, BorderLayout.NORTH)
-            add(JPanel(GridLayout(2, 1, 0, 4)).apply {
-                add(selector)
-                add(searchBar)
-            }, BorderLayout.CENTER)
+            add(selector, BorderLayout.CENTER)
         }
         val pager = JPanel(FlowLayout(FlowLayout.RIGHT, 4, 0)).apply {
             add(prevButton)
             add(nextButton)
+            add(fullscreenButton)
         }
         val bottom = JPanel(BorderLayout()).apply {
             add(statusLabel, BorderLayout.CENTER)
@@ -209,10 +172,10 @@ class TargetLogDialog(
         return JPanel(BorderLayout(0, 6)).apply {
             border = JBUI.Borders.empty(8)
             add(top, BorderLayout.NORTH)
-            add(JBScrollPane(logPane), BorderLayout.CENTER)
+            add(logView.component, BorderLayout.CENTER)
             add(bottom, BorderLayout.SOUTH)
             preferredSize = Dimension(960, 620)
-        }
+        }.also { applySoftWrap() }
     }
 
     override fun createActions(): Array<Action> = arrayOf(downloadAction, closeAction)
@@ -220,34 +183,23 @@ class TargetLogDialog(
     override fun dispose() {
         disposed = true
         autoRefreshTimer.stop()
-        searchTimer.stop()
+        Disposer.dispose(logViewDisposable)
         super.dispose()
     }
 
     private fun installShortcuts() {
         rootPane.getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW).apply {
-            put(KeyStroke.getKeyStroke("control F"), "focusLogSearch")
             put(KeyStroke.getKeyStroke("F11"), "toggleLogFullscreen")
         }
-        rootPane.actionMap.apply {
-            put("focusLogSearch", object : AbstractAction() {
-                override fun actionPerformed(e: ActionEvent) {
-                    searchField.requestFocusInWindow()
-                    searchField.selectAll()
-                }
-            })
-            put("toggleLogFullscreen", object : AbstractAction() {
-                override fun actionPerformed(e: ActionEvent) {
-                    toggleFullscreen()
-                }
-            })
-        }
-        searchField.inputMap.put(KeyStroke.getKeyStroke("shift ENTER"), "previousLogHit")
-        searchField.actionMap.put("previousLogHit", object : AbstractAction() {
+        rootPane.actionMap.put("toggleLogFullscreen", object : AbstractAction() {
             override fun actionPerformed(e: ActionEvent) {
-                findPrevious()
+                toggleFullscreen()
             }
         })
+    }
+
+    private fun applySoftWrap() {
+        (logView as? ConsoleViewImpl)?.editor?.settings?.isUseSoftWraps = softWrapBox.isSelected
     }
 
     private fun refreshFiles() {
@@ -360,100 +312,73 @@ class TargetLogDialog(
         }
     }
 
-    private fun setLogText(text: String) {
-        logPane.styledDocument.apply {
-            remove(0, length)
-            insertString(0, normalizeLineEndings(text), normalAttributes)
-        }
-        applyLogHighlight()
-        logPane.caretPosition = 0
-        rebuildSearchHighlights()
-    }
-
-    private fun applyLogHighlight() {
-        val document = logPane.styledDocument
-        val text = document.getText(0, document.length)
-        logStyleRules.forEach { (regex, attributes) ->
-            regex.findAll(text).forEach {
-                document.setCharacterAttributes(it.range.first, it.value.length, attributes, false)
+    private fun openInEditor() {
+        val file = currentFile ?: return
+        loading = true
+        updateControls()
+        statusLabel.text = "正在准备 ${file.name}…"
+        app.executeOnPooledThread {
+            val result = runCatching {
+                val dir = Paths.get(PathManager.getTempPath(), "bt-deploy-logs", safeName(target.name))
+                Files.createDirectories(dir)
+                val localPath = dir.resolve(safeName(file.name))
+                client.downloadFile("$logsDir/${file.name}", localPath)
+                LocalFileSystem.getInstance().refreshAndFindFileByPath(localPath.toString())
             }
+            app.invokeLater({
+                if (disposed) return@invokeLater
+                loading = false
+                updateControls()
+                result.fold(
+                    onSuccess = { virtualFile ->
+                        if (virtualFile == null) {
+                            statusLabel.text = "无法在 IDEA 中打开 ${file.name}"
+                        } else {
+                            FileEditorManager.getInstance(project).openFile(virtualFile, true)
+                            statusLabel.text = "已在 IDEA 中打开 ${file.name}（临时副本）"
+                        }
+                    },
+                    onFailure = { statusLabel.text = "打开 ${file.name} 失败：${it.message?.take(100) ?: "未知错误"}" },
+                )
+            }, ModalityState.any())
         }
     }
 
-    private fun scheduleSearch() {
-        searchTimer.restart()
-    }
+    private fun setLogText(text: String) {
+        logView.clear()
+        var contentType = ConsoleViewContentType.NORMAL_OUTPUT
+        val chunk = StringBuilder()
 
-    private fun rebuildSearchHighlights() {
-        if (disposed) return
-        logPane.highlighter.removeAllHighlights()
-        currentSearchHighlight = null
-        searchHits = emptyList()
-        searchIndex = -1
-        searchLimitReached = false
-
-        val term = searchField.text.trim()
-        if (term.isEmpty()) {
-            hitsLabel.text = ""
-            return
-        }
-        val document = logPane.document
-        val matches = Regex(Regex.escape(term), RegexOption.IGNORE_CASE)
-            .findAll(document.getText(0, document.length))
-            .map { it.range }
-            .take(MAX_SEARCH_HITS + 1)
-            .toList()
-        searchLimitReached = matches.size > MAX_SEARCH_HITS
-        searchHits = matches.take(MAX_SEARCH_HITS)
-        if (searchHits.isEmpty()) {
-            hitsLabel.text = "0/0"
-            return
+        fun append(value: String, type: ConsoleViewContentType) {
+            if (value.isEmpty()) return
+            if (type !== contentType && chunk.isNotEmpty()) {
+                logView.print(chunk.toString(), contentType)
+                chunk.clear()
+            }
+            contentType = type
+            chunk.append(value)
         }
 
-        searchHits.forEach {
-            logPane.highlighter.addHighlight(it.first, it.last + 1, searchPainter)
+        normalizeLineEndings(text).lineSequence().forEach { line ->
+            var offset = 0
+            logTokenRegex.findAll(line).forEach { match ->
+                append(line.substring(offset, match.range.first), ConsoleViewContentType.NORMAL_OUTPUT)
+                append(match.value, logContentType(match))
+                offset = match.range.last + 1
+            }
+            append(line.substring(offset), ConsoleViewContentType.NORMAL_OUTPUT)
+            append("\n", ConsoleViewContentType.NORMAL_OUTPUT)
         }
-        searchIndex = 0
-        selectSearchHit()
+        if (chunk.isNotEmpty()) logView.print(chunk.toString(), contentType)
+        logView.performWhenNoDeferredOutput { logView.scrollTo(0) }
     }
 
-    private fun findNext() {
-        moveSearchHit(1)
-    }
-
-    private fun findPrevious() {
-        moveSearchHit(-1)
-    }
-
-    private fun moveSearchHit(step: Int) {
-        if (searchHits.isEmpty()) {
-            rebuildSearchHighlights()
-            return
-        }
-        searchIndex = (searchIndex + step + searchHits.size) % searchHits.size
-        selectSearchHit()
-    }
-
-    private fun selectSearchHit() {
-        val hit = searchHits.getOrNull(searchIndex) ?: return
-        currentSearchHighlight?.let(logPane.highlighter::removeHighlight)
-        currentSearchHighlight = logPane.highlighter.addHighlight(
-            hit.first,
-            hit.last + 1,
-            currentSearchPainter,
-        )
-        hitsLabel.text = "${searchIndex + 1}/${searchHits.size}${if (searchLimitReached) "+" else ""}"
-        logPane.select(hit.first, hit.last + 1)
-        logPane.modelToView2D(hit.first)?.let { logPane.scrollRectToVisible(it.bounds) }
-    }
-
-    private fun changeFontSize(delta: Int) {
-        fontSize = (fontSize + delta).coerceIn(MIN_FONT_SIZE, MAX_FONT_SIZE)
-        applyFontSize()
-    }
-
-    private fun applyFontSize() {
-        logPane.font = Font(Font.MONOSPACED, Font.PLAIN, fontSize)
+    private fun logContentType(match: MatchResult): ConsoleViewContentType = when {
+        match.groups["timestamp"] != null -> ConsoleViewContentType.SYSTEM_OUTPUT
+        match.groups["error"] != null -> ConsoleViewContentType.LOG_ERROR_OUTPUT
+        match.groups["warning"] != null -> ConsoleViewContentType.LOG_WARNING_OUTPUT
+        match.groups["info"] != null -> ConsoleViewContentType.LOG_INFO_OUTPUT
+        else -> ConsoleViewContentType.LOG_DEBUG_OUTPUT
     }
 
     private fun toggleFullscreen() {
@@ -474,6 +399,7 @@ class TargetLogDialog(
         val idle = !loading
         fileCombo.isEnabled = idle && files.isNotEmpty()
         refreshButton.isEnabled = idle
+        openInEditorButton.isEnabled = idle && currentFile != null
         autoRefreshBox.isEnabled = idle
         prevButton.isEnabled = idle && currentPage > 1
         nextButton.isEnabled = idle && hasNext
@@ -487,6 +413,8 @@ class TargetLogDialog(
     private fun normalizeLineEndings(text: String): String =
         text.replace("\r\n", "\n").replace('\r', '\n')
 
+    private fun safeName(name: String): String = name.replace(Regex("""[\\/:*?"<>|]"""), "_")
+
     private fun formatSize(size: Long): String = when {
         size >= 1024 * 1024 -> "%.1f MB".format(Locale.ROOT, size / 1024.0 / 1024.0)
         size >= 1024 -> "%.1f KB".format(Locale.ROOT, size / 1024.0)
@@ -497,29 +425,5 @@ class TargetLogDialog(
 
     private companion object {
         const val MAX_READ_SIZE = 10L * 1024 * 1024
-        const val MAX_SEARCH_HITS = 2_000
-        const val MIN_FONT_SIZE = 10
-        const val MAX_FONT_SIZE = 28
-
-        fun logAttributes(type: ConsoleViewContentType): SimpleAttributeSet =
-            SimpleAttributeSet().apply {
-                type.attributes.foregroundColor?.let { StyleConstants.setForeground(this, it) }
-                val fontType = type.attributes.fontType
-                StyleConstants.setBold(this, fontType and Font.BOLD != 0)
-                StyleConstants.setItalic(this, fontType and Font.ITALIC != 0)
-            }
-    }
-
-    private class LogTextPane : JTextPane(), Scrollable {
-        override fun getPreferredScrollableViewportSize(): Dimension = preferredSize
-
-        override fun getScrollableUnitIncrement(visibleRect: Rectangle, orientation: Int, direction: Int): Int = 16
-
-        override fun getScrollableBlockIncrement(visibleRect: Rectangle, orientation: Int, direction: Int): Int =
-            visibleRect.height
-
-        override fun getScrollableTracksViewportWidth(): Boolean = false
-
-        override fun getScrollableTracksViewportHeight(): Boolean = false
     }
 }

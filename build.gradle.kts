@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "com.mrmao14"
-version = "0.5.0"
+version = "0.5.3"
 
 repositories {
     mavenCentral()
