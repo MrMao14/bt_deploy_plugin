@@ -57,13 +57,7 @@ class TargetLogDialog(
     private val fullscreenButton = JButton("全屏")
     private val statusLabel = JBLabel("正在读取日志列表…")
     private val logViewDisposable = Disposer.newDisposable()
-    private val logView = TextConsoleBuilderFactory.getInstance()
-        .createBuilder(project)
-        .apply {
-            setViewer(true)
-            setUseOwnModalityStateForUpdates(true)
-        }
-        .console
+    private val logView = createLogView(project)
     private val prevButton = JButton("<")
     private val nextButton = JButton(">")
 
@@ -205,6 +199,25 @@ class TargetLogDialog(
         (logView as? ConsoleViewImpl)?.editor?.settings?.isUseSoftWraps = softWrapBox.isSelected
     }
 
+    /** ConsoleView 默认 1MB 循环缓冲会先丢弃最新日志，创建本控制台时临时关闭。 */
+    private fun createLogView(project: Project) = run {
+        val property = "idea.cycle.buffer.size"
+        val previous = System.getProperty(property)
+        System.setProperty(property, "disabled")
+        try {
+            TextConsoleBuilderFactory.getInstance()
+                .createBuilder(project)
+                .apply {
+                    setViewer(true)
+                    setUseOwnModalityStateForUpdates(true)
+                }
+                .console
+                .also { it.component }
+        } finally {
+            if (previous == null) System.clearProperty(property) else System.setProperty(property, previous)
+        }
+    }
+
     private fun refreshFiles() {
         if (loading || disposed) return
         loading = true
@@ -275,7 +288,7 @@ class TargetLogDialog(
                 if (disposed) return@invokeLater
                 loading = false
                 result.onSuccess { body ->
-                    setLogText(if (requestedPage > 1) body.text else newestFirst(body.text))
+                    setLogText(if (largeFile) body.text else newestFirst(body.text))
                     hasNext = body.hasNext
                     val pageText = if (largeFile) " · 第 $requestedPage 段" else ""
                     statusLabel.text =
