@@ -8,6 +8,7 @@ import com.intellij.openapi.progress.ProgressIndicator
 import com.intellij.openapi.progress.Task
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
+import com.intellij.openapi.ui.popup.JBPopupFactory
 import com.intellij.ui.JBColor
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBScrollPane
@@ -470,31 +471,30 @@ class BtDeployPanel(private val project: Project) {
                 }
 
                 val labels = backups.map { "${it.name}  ${formatSize(it.size)}  ${formatBackupTime(it.mtime)}" }
-                val index = Messages.showChooseDialog(
-                    project,
-                    "选择要还原的备份：",
-                    "还原备份",
-                    Messages.getQuestionIcon(),
-                    labels.toTypedArray(),
-                    labels.first(),
-                )
-                if (index < 0) return@invokeLater
+                JBPopupFactory.getInstance()
+                    .createPopupChooserBuilder(labels)
+                    .setTitle("选择要还原的备份")
+                    .setItemChosenCallback { chosen ->
+                        val backup = backups[labels.indexOf(chosen)]
+                        app.invokeLater {
+                            val answer = Messages.showYesNoDialog(
+                                project,
+                                "用「${backup.name}」覆盖 ${target.remoteDir} 里的现有文件？",
+                                "确认还原",
+                                Messages.getWarningIcon(),
+                            )
+                            if (answer != Messages.YES) return@invokeLater
 
-                val backup = backups[index]
-                val answer = Messages.showYesNoDialog(
-                    project,
-                    "用「${backup.name}」覆盖 ${target.remoteDir} 里的现有文件？",
-                    "确认还原",
-                    Messages.getWarningIcon(),
-                )
-                if (answer != Messages.YES) return@invokeLater
-
-                prepareLogFor(target)
-                appendLog(target, "===== 还原备份：${backup.name} =====")
-                val config = deployConfig(target)
-                runTask("还原备份", target, "还原完成 ✅") { _, log ->
-                    Deployer.restoreBackup(client, config, backup.name, log)
-                }
+                            prepareLogFor(target)
+                            appendLog(target, "===== 还原备份：${backup.name} =====")
+                            val config = deployConfig(target)
+                            runTask("还原备份", target, "还原完成 ✅") { _, log ->
+                                Deployer.restoreBackup(client, config, backup.name, log)
+                            }
+                        }
+                    }
+                    .createPopup()
+                    .showInFocusCenter()
             }
         }
     }

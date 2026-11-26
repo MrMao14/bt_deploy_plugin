@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "com.mrmao14"
-version = "0.6.0"
+version = "0.6.1"
 
 repositories {
     mavenCentral()
@@ -36,6 +36,8 @@ java {
 kotlin {
     compilerOptions {
         jvmTarget.set(JvmTarget.JVM_25)
+        // 不生成接口默认方法的兼容桥接方法，避免插件校验把桥接调用误报为弃用/实验 API 使用
+        freeCompilerArgs.add("-jvm-default=no-compatibility")
     }
 }
 

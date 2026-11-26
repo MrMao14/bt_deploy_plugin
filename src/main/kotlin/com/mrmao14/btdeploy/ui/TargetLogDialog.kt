@@ -8,7 +8,7 @@ import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.fileChooser.FileChooserFactory
 import com.intellij.openapi.fileChooser.FileSaverDescriptor
-import com.intellij.openapi.fileEditor.FileEditorManager
+import com.intellij.openapi.fileEditor.OpenFileDescriptor
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.DialogWrapper
 import com.intellij.openapi.util.Disposer
@@ -207,11 +207,9 @@ class TargetLogDialog(
         try {
             TextConsoleBuilderFactory.getInstance()
                 .createBuilder(project)
-                .apply {
-                    setViewer(true)
-                    setUseOwnModalityStateForUpdates(true)
-                }
+                .apply { setViewer(true) }
                 .console
+                .also { (it as? ConsoleViewImpl)?.useOwnModalityForUpdates = true }
                 .also { it.component }
         } finally {
             if (previous == null) System.clearProperty(property) else System.setProperty(property, previous)
@@ -350,7 +348,7 @@ class TargetLogDialog(
                         if (virtualFile == null) {
                             statusLabel.text = "无法在 IDEA 中打开 ${file.name}"
                         } else {
-                            FileEditorManager.getInstance(project).openFile(virtualFile, true)
+                            OpenFileDescriptor(project, virtualFile).navigate(true)
                             statusLabel.text = "已在 IDEA 中打开 ${file.name}（临时副本）"
                         }
                     },
